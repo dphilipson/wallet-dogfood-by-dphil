@@ -9,7 +9,7 @@ use alloy::{
 };
 use alloy_signer_local::PrivateKeySigner;
 use jsonrpsee::{http_client::HttpClient, proc_macros::rpc};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[tokio::main]
@@ -32,19 +32,16 @@ async fn main() -> anyhow::Result<()> {
             + 1000 * 60 * 60 * 24 * 30, // 30 days
     );
 
-    println!("Hello");
-
     let account_response = client
         .request_account(RequestAccountRequest {
             signer_address: owner_signer.address(),
         })
         .await?;
-    println!("Hello2");
 
     let session_response = client
         .create_session(CreateSessionRequest {
             account: account_response.account_address,
-            chain_id, // how can this be non-hex?
+            chain_id,
             expiry,
             key: Key {
                 public_key: session_signer.address(),
@@ -55,8 +52,6 @@ async fn main() -> anyhow::Result<()> {
             }],
         })
         .await?;
-    println!("Hello3");
-    println!("session response: {:?}", session_response);
 
     let signature = owner_signer
         .sign_dynamic_typed_data(&serde_json::from_value(
@@ -71,10 +66,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let capabilities = Capabilities {
+        paymaster_service: PaymasterService {
+            policy_id: env::var("PAYMASTER_POLICY_ID")?,
+        },
         permissions: CapabilitiesPermissions { context },
     };
-
-    println!("Capabilities: {:?}", capabilities);
 
     let prepare_req = PrepareCallsRequest {
         capabilities: capabilities.clone(),
@@ -83,19 +79,7 @@ async fn main() -> anyhow::Result<()> {
         chain_id,
     };
 
-    println!("\n\n");
-
-    println!(
-        "prepareCallsRequest JSON:\n{}",
-        serde_json::to_string_pretty(&prepare_req)?
-    );
-
     let prepare_calls_response = client.prepare_calls(prepare_req).await?;
-
-    println!(
-        "prepare calls response: {:?}",
-        serde_json::to_string_pretty(&prepare_calls_response)
-    );
 
     let hash_to_sign = prepare_calls_response.signature_request.data.raw;
 
@@ -103,8 +87,6 @@ async fn main() -> anyhow::Result<()> {
         .sign_message(&hash_to_sign)
         .await?
         .to_string();
-
-    // println!("1 as hex: {}", serialize_u64_as_hex(&1));
 
     let send_prepared_calls_request = SendPreparedCallsRequest {
         r#type: prepare_calls_response.r#type,
@@ -116,11 +98,6 @@ async fn main() -> anyhow::Result<()> {
             signature,
         },
     };
-
-    println!(
-        "\n\nsend_prepared_calls_request JSON:\n {:?}",
-        serde_json::to_string_pretty(&send_prepared_calls_request)
-    );
 
     let send_prepared_calls_response = client
         .send_prepared_calls(send_prepared_calls_request)
@@ -193,14 +170,14 @@ struct PrepareCallsRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Capabilities {
-    paymasterService: PaymasterService,
+    paymaster_service: PaymasterService,
     permissions: CapabilitiesPermissions,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PaymasterService {
-    policyId: String,
+    policy_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -249,6 +226,12 @@ struct SendPreparedCallsRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SendPreparedCallsResponse {
+    prepared_call_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SignatureObject {
     r#type: String,
     signature: String,
@@ -277,5 +260,5 @@ trait WalletRpc {
     async fn send_prepared_calls(
         &self,
         request: SendPreparedCallsRequest,
-    ) -> Result<Vec<String>, ErrorObjectOwned>;
+    ) -> Result<SendPreparedCallsResponse, ErrorObjectOwned>;
 }
