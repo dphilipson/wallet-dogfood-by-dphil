@@ -1,10 +1,11 @@
 use std::{
     env,
+    str::FromStr,
     time::{self, SystemTime},
 };
 
 use alloy::{
-    primitives::{Address, Bytes, U64, keccak256},
+    primitives::{Address, Bytes, FixedBytes, U64, U256, bytes, keccak256},
     signers::Signer,
 };
 use alloy_signer_local::PrivateKeySigner;
@@ -28,15 +29,38 @@ async fn main() -> anyhow::Result<()> {
     let expiry = U64::from(
         SystemTime::now()
             .duration_since(time::UNIX_EPOCH)?
-            .as_millis()
-            + 1000 * 60 * 60 * 24 * 30, // 30 days
+            .as_secs()
+            - 60 * 60 * 24 * 30, // 30 days
     );
+
+    println!("Expiry: {}", expiry);
 
     let account_response = client
         .request_account(RequestAccountRequest {
             signer_address: owner_signer.address(),
         })
         .await?;
+
+    println!(
+        "wtf: {:?}",
+        serde_json::to_string_pretty(&CreateSessionRequest {
+            account: account_response.account_address,
+            chain_id,
+            expiry,
+            key: Key {
+                public_key: session_signer.address(),
+                r#type: "secp256k1".to_string(),
+            },
+            permissions: vec![
+                Permission::NativeTokenTransfer {
+                    allowance: U64::from(1),
+                },
+                Permission::FunctionsOnAllContracts {
+                    functions: vec![FixedBytes::from_str("0xddf252ad")?],
+                },
+            ],
+        })?
+    );
 
     let session_response = client
         .create_session(CreateSessionRequest {
@@ -47,11 +71,18 @@ async fn main() -> anyhow::Result<()> {
                 public_key: session_signer.address(),
                 r#type: "secp256k1".to_string(),
             },
-            permissions: vec![Permission {
-                r#type: "root".to_string(),
-            }],
+            permissions: vec![
+                Permission::NativeTokenTransfer {
+                    allowance: U64::from(1),
+                },
+                Permission::FunctionsOnAllContracts {
+                    functions: vec![FixedBytes::from_str("0xddf252ad")?],
+                },
+            ],
         })
         .await?;
+
+    println!("session response: {:?}", session_response);
 
     let signature = owner_signer
         .sign_dynamic_typed_data(&serde_json::from_value(
@@ -74,7 +105,10 @@ async fn main() -> anyhow::Result<()> {
 
     let prepare_req = PrepareCallsRequest {
         capabilities: capabilities.clone(),
-        calls: vec![Call { to: Address::ZERO }],
+        calls: vec![Call {
+            to: Address::ZERO,
+            data: bytes!("0xddf252ad"),
+        }],
         from: account_response.account_address,
         chain_id,
     };
@@ -139,9 +173,34 @@ struct Key {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Permission {
-    r#type: String,
+#[serde(rename_all = "kebab-case", tag = "type", content = "data")]
+enum Permission {
+    /// full root permissions (no data)
+    Root,
+
+    /// allow up to a specified allowance
+    NativeTokenTransfer { allowance: U64 },
+
+    /// transfer ERC20 tokens up to allowance
+    Erc20TokenTransfer { address: Address, allowance: U64 },
+
+    /// set a maximum gas limit
+    GasLimit { limit: U256 },
+
+    /// allow arbitrary contract calls (no data)
+    ContractAccess { address: Address },
+
+    /// allowed functions on the user’s own account
+    AccountFunctions { functions: Vec<FixedBytes<4>> },
+
+    /// allow calls to specific functions on any contract
+    FunctionsOnAllContracts { functions: Vec<FixedBytes<4>> },
+
+    /// allow calls to specific functions on a single contract
+    FunctionsOnContract {
+        address: Address,
+        functions: Vec<FixedBytes<4>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -190,6 +249,7 @@ struct CapabilitiesPermissions {
 #[serde(rename_all = "camelCase")]
 struct Call {
     to: Address,
+    data: Bytes,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
