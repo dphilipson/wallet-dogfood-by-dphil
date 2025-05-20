@@ -33,34 +33,11 @@ async fn main() -> anyhow::Result<()> {
             - 60 * 60 * 24 * 30, // 30 days
     );
 
-    println!("Expiry: {}", expiry);
-
     let account_response = client
         .request_account(RequestAccountRequest {
             signer_address: owner_signer.address(),
         })
         .await?;
-
-    println!(
-        "wtf: {:?}",
-        serde_json::to_string_pretty(&CreateSessionRequest {
-            account: account_response.account_address,
-            chain_id,
-            expiry,
-            key: Key {
-                public_key: session_signer.address(),
-                r#type: "secp256k1".to_string(),
-            },
-            permissions: vec![
-                Permission::NativeTokenTransfer {
-                    allowance: U64::from(1),
-                },
-                Permission::FunctionsOnAllContracts {
-                    functions: vec![FixedBytes::from_str("0xddf252ad")?],
-                },
-            ],
-        })?
-    );
 
     let session_response = client
         .create_session(CreateSessionRequest {
@@ -81,8 +58,6 @@ async fn main() -> anyhow::Result<()> {
             ],
         })
         .await?;
-
-    println!("session response: {:?}", session_response);
 
     let signature = owner_signer
         .sign_dynamic_typed_data(&serde_json::from_value(
