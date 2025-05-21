@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         SystemTime::now()
             .duration_since(time::UNIX_EPOCH)?
             .as_secs()
-            - 60 * 60 * 24 * 30, // 30 days
+            + 60 * 60 * 24 * 30, // 30 days
     );
 
     let account_response = client
@@ -65,30 +65,33 @@ async fn main() -> anyhow::Result<()> {
         )?)
         .await?;
 
-    let context = format!(
-        "0x00{}{}",
-        &session_response.session_id[2..],
-        &signature.to_string()[2..],
-    );
+    // let context = format!(
+    //     "0x00{}{}",
+    //     &session_response.session_id[2..],
+    //     &signature.to_string()[2..],
+    // );
 
     let capabilities = Capabilities {
         paymaster_service: PaymasterService {
             policy_id: env::var("PAYMASTER_POLICY_ID")?,
         },
-        permissions: CapabilitiesPermissions { context },
+        permissions: Capability::CompoundCapability(CompoundCapability {
+            session_id: session_response.session_id,
+            signature: signature.to_string(),
+        }),
     };
 
-    let prepare_req = PrepareCallsRequest {
-        capabilities: capabilities.clone(),
-        calls: vec![Call {
-            to: Address::ZERO,
-            data: bytes!("0xddf252ad"),
-        }],
-        from: account_response.account_address,
-        chain_id,
-    };
-
-    let prepare_calls_response = client.prepare_calls(prepare_req).await?;
+    let prepare_calls_response = client
+        .prepare_calls(PrepareCallsRequest {
+            capabilities: capabilities.clone(),
+            calls: vec![Call {
+                to: Address::ZERO,
+                data: bytes!("0xddf252ad"),
+            }],
+            from: account_response.account_address,
+            chain_id,
+        })
+        .await?;
 
     let hash_to_sign = prepare_calls_response.signature_request.data.raw;
 
@@ -205,7 +208,7 @@ struct PrepareCallsRequest {
 #[serde(rename_all = "camelCase")]
 struct Capabilities {
     paymaster_service: PaymasterService,
-    permissions: CapabilitiesPermissions,
+    permissions: Capability,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -214,10 +217,24 @@ struct PaymasterService {
     policy_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+// #[derive(Clone, Debug, Deserialize, Serialize)]
+// #[serde(rename_all = "camelCase")]
+// struct CapabilitiesPermissions {
+//     context: String,
+// }
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+enum Capability {
+    Context(String),
+    CompoundCapability(CompoundCapability),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct CapabilitiesPermissions {
-    context: String,
+struct CompoundCapability {
+    session_id: String,
+    signature: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
