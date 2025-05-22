@@ -1,10 +1,11 @@
 use std::{
     env,
+    str::FromStr,
     time::{self, SystemTime},
 };
 
 use alloy::{
-    primitives::{Address, Bytes, U64, keccak256},
+    primitives::{Address, Bytes, FixedBytes, U64, U256, bytes, keccak256},
     signers::Signer,
 };
 use alloy_signer_local::PrivateKeySigner;
@@ -17,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv()?;
 
     let api_key = env::var("API_KEY")?;
-    let chain_id = U64::from(11155111); // Sepolia
+    let chain_id = U64::from(421614); // Arb Sepolia
 
     let alchemy_url = format!("https://api.g.alchemy.com/v2/{api_key}");
     let client = HttpClient::builder().build(alchemy_url)?;
@@ -28,8 +29,8 @@ async fn main() -> anyhow::Result<()> {
     let expiry = U64::from(
         SystemTime::now()
             .duration_since(time::UNIX_EPOCH)?
-            .as_millis()
-            + 1000 * 60 * 60 * 24 * 30, // 30 days
+            .as_secs()
+            + 60 * 60 * 24 * 30, // 30 days
     );
 
     let account_response = client
@@ -47,9 +48,14 @@ async fn main() -> anyhow::Result<()> {
                 public_key: session_signer.address(),
                 r#type: "secp256k1".to_string(),
             },
-            permissions: vec![Permission {
-                r#type: "root".to_string(),
-            }],
+            permissions: vec![
+                Permission::NativeTokenTransfer {
+                    allowance: U64::from(1),
+                },
+                Permission::FunctionsOnAllContracts {
+                    functions: vec![FixedBytes::from_str("0xddf252ad")?],
+                },
+            ],
         })
         .await?;
 
@@ -59,20 +65,23 @@ async fn main() -> anyhow::Result<()> {
         )?)
         .await?;
 
-    let context = format!(
-        "0x00{}{}",
-        &session_response.session_id[2..],
-        &signature.to_string()[2..],
-    );
-
     let capabilities = Capabilities {
-        permissions: CapabilitiesPermissions { context },
+        paymaster_service: PaymasterService {
+            policy_id: env::var("PAYMASTER_POLICY_ID")?,
+        },
+        permissions: Capability::CompoundCapability(CompoundCapability {
+            session_id: session_response.session_id,
+            signature: signature.to_string(),
+        }),
     };
 
     let prepare_calls_response = client
         .prepare_calls(PrepareCallsRequest {
             capabilities: capabilities.clone(),
-            calls: vec![Call { to: Address::ZERO }],
+            calls: vec![Call {
+                to: Address::ZERO,
+                data: bytes!("0xddf252ad"),
+            }],
             from: account_response.account_address,
             chain_id,
         })
@@ -85,17 +94,19 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .to_string();
 
+    let send_prepared_calls_request = SendPreparedCallsRequest {
+        r#type: prepare_calls_response.r#type,
+        chain_id,
+        data: prepare_calls_response.data,
+        capabilities,
+        signature: SignatureObject {
+            r#type: "secp256k1".to_string(),
+            signature,
+        },
+    };
+
     let send_prepared_calls_response = client
-        .send_prepared_calls(SendPreparedCallsRequest {
-            r#type: prepare_calls_response.r#type,
-            chain_id,
-            data: prepare_calls_response.data,
-            capabilities,
-            signature: SignatureObject {
-                r#type: "ecdsa".to_string(),
-                signature,
-            },
-        })
+        .send_prepared_calls(send_prepared_calls_request)
         .await?;
 
     dbg!(send_prepared_calls_response);
@@ -134,9 +145,34 @@ struct Key {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Permission {
-    r#type: String,
+#[serde(rename_all = "kebab-case", tag = "type", content = "data")]
+enum Permission {
+    /// full root permissions (no data)
+    Root,
+
+    /// allow up to a specified allowance
+    NativeTokenTransfer { allowance: U64 },
+
+    /// transfer ERC20 tokens up to allowance
+    Erc20TokenTransfer { address: Address, allowance: U64 },
+
+    /// set a maximum gas limit
+    GasLimit { limit: U256 },
+
+    /// allow arbitrary contract calls (no data)
+    ContractAccess { address: Address },
+
+    /// allowed functions on the user’s own account
+    AccountFunctions { functions: Vec<FixedBytes<4>> },
+
+    /// allow calls to specific functions on any contract
+    FunctionsOnAllContracts { functions: Vec<FixedBytes<4>> },
+
+    /// allow calls to specific functions on a single contract
+    FunctionsOnContract {
+        address: Address,
+        functions: Vec<FixedBytes<4>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -165,19 +201,41 @@ struct PrepareCallsRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Capabilities {
-    permissions: CapabilitiesPermissions,
+    paymaster_service: PaymasterService,
+    permissions: Capability,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CapabilitiesPermissions {
-    context: String,
+struct PaymasterService {
+    policy_id: String,
+}
+
+// #[derive(Clone, Debug, Deserialize, Serialize)]
+// #[serde(rename_all = "camelCase")]
+// struct CapabilitiesPermissions {
+//     context: String,
+// }
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+enum Capability {
+    Context(String),
+    CompoundCapability(CompoundCapability),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CompoundCapability {
+    session_id: String,
+    signature: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Call {
     to: Address,
+    data: Bytes,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -214,6 +272,12 @@ struct SendPreparedCallsRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SendPreparedCallsResponse {
+    prepared_call_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SignatureObject {
     r#type: String,
     signature: String,
@@ -242,5 +306,5 @@ trait WalletRpc {
     async fn send_prepared_calls(
         &self,
         request: SendPreparedCallsRequest,
-    ) -> Result<Vec<String>, ErrorObjectOwned>;
+    ) -> Result<SendPreparedCallsResponse, ErrorObjectOwned>;
 }
