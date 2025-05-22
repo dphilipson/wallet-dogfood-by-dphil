@@ -65,12 +65,6 @@ async fn main() -> anyhow::Result<()> {
         )?)
         .await?;
 
-    // let context = format!(
-    //     "0x00{}{}",
-    //     &session_response.session_id[2..],
-    //     &signature.to_string()[2..],
-    // );
-
     let capabilities = Capabilities {
         paymaster_service: PaymasterService {
             policy_id: env::var("PAYMASTER_POLICY_ID")?,
